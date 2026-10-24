@@ -1,0 +1,702 @@
+---
+title: "PSYC559 Project 1, Part 2: NHIS 2025"
+author: "Neha Panda"
+date: "`r Sys.Date()`"
+output:
+  pdf_document:
+    toc: true
+  html_document:
+    toc: true
+editor_options:
+  markdown:
+    wrap: 72
+---
+
+```{r setup, include = FALSE}
+# error = TRUE lets the file knit even if a chunk still has a problem,
+# so you always have something to submit. Fix what you can first.
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, error = FALSE)
+```
+
+```{r packages}
+library(naniar)   # finding and recoding missing values
+library(dplyr)    # data manipulation and the pipe
+library(ggplot2)  # plots
+library(rsample)  # splitting data into training and test sets
+library(recipes)  # imputation, dummy coding, and scaling
+library(caret)    # train(), cross validation, and performance metrics
+library(glmnet)   # ridge, lasso, and elastic net
+```
+
+## 1. Define the Research Question
+
+**State what you will predict, and from** **what. Identify the problem the**
+**model is meant to solve. Explain why the problem matters, how a**
+**prediction would help, and who would use it. State whether your target**
+**is continuous or dichotomous, and thus whether you use linear or**
+**logistic regression.**
+
+This project will be predicting moderate-to-severe PHQ-8 depression from
+routine demographic/health variables. The question of whether or not a
+person will have moderate-to-severe PHQ-8 depression ("yes"/"no") is a
+dichotomous target, so we will be using logistic regression.
+
+## 2. Recode Your Variables
+
+**Run `str()` and compare each variable to its codebook.**
+
+**Remove columns that should not be predictors, such as ID numbers, names,**
+**and dates of data collection.**
+
+**Remove any variable that would not be known at the time you make the**
+**prediction, or that is another version of the target to avoid data**
+**leakage about the outcome into the model.**
+
+```{r data}
+
+csv_file <- "adult25.csv"
+zip_file <- "adult25csv.zip"
+zip_url  <- "https://ftp.cdc.gov/pub/Health_Statistics/NCHS/Datasets/NHIS/2025/adult25csv.zip"
+
+if (!file.exists(csv_file)) {
+  download.file(zip_url, zip_file, mode = "wb")
+  unzip(zip_file)
+}
+
+dat <- read.csv(csv_file)
+dim(dat)
+
+
+# define your variable set FIRST
+vars <- c("PHQCAT_A", "AGEP_A", "SEX_A", "EDUCP_A", "RATCAT_A",
+          "MARSTAT_A", "BMICAT_A", "SMKCIGST_A", "DISAB3_A",
+          "PHSTAT_A", "REGION")
+
+str(dat[vars])
+
+lapply(dat[vars], function(x) table(x, useNA = "always"))
+dat <- dat[vars]   # now dat has only your 11 variables
+```
+
+### Codebook
+
+| Variable | What it measures | How it is stored in the file |
+|---|---|---|
+| `PHQCAT_A` | **Target.** Depressive symptom severity (PHQ-8), derived by NCHS from the eight PHQ-8 items | 1 = none/minimal, 2 = mild, 3 = moderate, 4 = severe; 8 = not ascertained (missing) |
+| `AGEP_A` | Age in years (top-coded) | Number; 18–84 = years, 85 = 85+; 97 = refused, 98 = not ascertained, 99 = don't know |
+| `SEX_A` | Sex | 1 = male, 2 = female; 7 = refused, 8 = not ascertained, 9 = don't know |
+| `EDUCP_A` | Educational attainment | 01 = grade 0–11, 02 = 12th no diploma, 03 = GED, 04 = HS graduate, 05 = some college, 06 = associate (occ/tech), 07 = associate (academic), 08 = bachelor's, 09 = master's, 10 = professional/doctoral; 97 = refused, 98 = not ascertained, 99 = don't know |
+| `RATCAT_A` | Family income-to-poverty ratio (imputed) | 01–14, from 01 = 0.00–0.49 up to 14 = 5.00 or greater; 98 = not ascertained (0 cases) |
+| `MARSTAT_A` | Marital status | 1 = married/spouse present, 2 = married/spouse absent, 3 = married/spouse presence unknown, 4 = widowed, 5 = divorced, 6 = separated, 7 = never married, 8 = living with a partner; 9 = unknown (missing) |
+| `BMICAT_A` | BMI category | 1 = underweight, 2 = healthy weight, 3 = overweight, 4 = obese; 9 = unknown (missing) |
+| `SMKCIGST_A` | Cigarette smoking status | 1 = current every-day, 2 = current some-day, 3 = former, 4 = never, 5 = smoker/status unknown (1 case); 9 = unknown if ever smoked (missing) |
+| `DISAB3_A` | Disability status (Washington Group short set) | 1 = yes, 2 = no; 9 = don't know (0 cases) |
+| `PHSTAT_A` | Self-rated general health | 1 = excellent, 2 = very good, 3 = good, 4 = fair, 5 = poor; 7 = refused, 8 = not ascertained, 9 =
+
+### Numbers That Are Really Categories
+
+**Convert categories stored as numbers into factors with readable labels,**
+**using `factor()` with levels and labels. Check the result with**
+**`table(x, useNA = "always")`. Any code left out of levels becomes `NA`.**
+
+**The first table shows the codes before recoding, and the second**
+**shows the result.**
+
+```{r}
+table(dat$SEX_A, useNA = "always")
+
+dat$SEX_A <- factor(
+  dat$SEX_A, levels = c(1, 2),
+  labels = c("male", "female")
+)
+
+table(dat$SEX_A, useNA = "always")
+
+```
+
+```{r factor MARSTAT_A}
+
+table(dat$MARSTAT_A, useNA = "always")
+
+dat$MARSTAT_A <- factor(
+  dat$MARSTAT_A, levels = c(1, 2, 3, 4, 5, 6, 7, 8),
+  labels = c("married/spouse present", "married/spouse absent",
+             "married/spouse presence unknown", "widowed", "divorced",
+             "separated", "never married", "living with a partner"))
+
+table(dat$MARSTAT_A, useNA = "always")
+
+```
+
+```{r factor BMICAT_A}
+table(dat$BMICAT_A, useNA = "always")
+
+dat$BMICAT_A <- factor(
+  dat$BMICAT_A, levels = c(1, 2, 3, 4),
+  labels = c("underweight", "healthy weight", "overweight", "obese"))
+
+table(dat$BMICAT_A, useNA = "always")
+
+```
+```{r factor SMKCIGST_A}
+table(dat$SMKCIGST_A, useNA = "always")
+
+dat$SMKCIGST_A <- factor(
+  dat$SMKCIGST_A, levels = c(1, 2, 3, 4),
+  labels = c("current every-day", "current some-day", "former", "never"))
+
+table(dat$SMKCIGST_A, useNA = "always")
+
+```
+
+```{r factor DISAB3_A}
+table(dat$DISAB3_A, useNA = "always")
+
+dat$DISAB3_A <- factor(
+  dat$DISAB3_A, levels = c(1, 2),
+  labels = c("yes", "no"))
+
+table(dat$DISAB3_A, useNA = "always")
+
+```
+
+```{r factor REGION}
+
+table(dat$REGION, useNA = "always")
+
+dat$REGION <- factor(
+  dat$REGION, levels = c(1, 2, 3, 4),
+  labels = c("Northeast", "Midwest", "South", "West"))
+
+table(dat$REGION, useNA = "always")
+
+```
+### Text That Should Be a Number
+
+**Convert numbers stored as text into numbers with as.numeric(). Count how**
+**many values became `NA`, and make sure only the entries you expected**
+**were lost.**
+
+I do not need to convert the only numeric variable, AGEP_A to numbers because
+all values are already numeric, even the code for missingness.
+
+```{r}
+class(dat$AGEP_A)
+dat$AGEP_A[dat$AGEP_A %in% c(97, 98, 99)] <- NA
+```
+
+### Recoding Ordinal Variables as Numeric
+
+**Decide whether ordinal variables, such as Likert items or education**
+**level, are treated as numbers or as factors, and explain your choice.**
+
+```{r}
+table(dat$EDUCP_A, useNA = "always")
+
+# 97 = refused, 98 = not ascertained, 99 = don't know -> NA; 01-10 kept numeric
+dat$EDUCP_A[dat$EDUCP_A %in% c(97, 98, 99)] <- NA
+
+table(dat$EDUCP_A, useNA = "always")
+```
+
+```{r}
+table(dat$RATCAT_A, useNA = "always")
+
+# 98 = not ascertained -> NA; 01-14 income bands kept numeric
+dat$RATCAT_A[dat$RATCAT_A %in% c(98)] <- NA
+
+table(dat$RATCAT_A, useNA = "always")
+```
+
+```{r}
+table(dat$PHSTAT_A, useNA = "always")
+
+# 7 = refused, 8 = not ascertained, 9 = don't know -> NA; 1-5 kept numeric
+dat$PHSTAT_A[dat$PHSTAT_A %in% c(7, 8, 9)] <- NA
+
+table(dat$PHSTAT_A, useNA = "always")
+```
+
+### Fixing the Dichotomous Target
+
+Here I recode missingness and collapse to two classes.
+
+```{r}
+
+# 8 = not ascertained -> NA
+dat$PHQCAT_A[dat$PHQCAT_A %in% c(8)] <- NA
+
+# collapse to two classes; NA target stays NA (dropped later in Part 4)
+dat$dep_modplus <- factor(
+  dplyr::case_when(
+    dat$PHQCAT_A %in% c(3, 4) ~ "mod_plus",
+    dat$PHQCAT_A %in% c(1, 2) ~ "none_mild",
+    TRUE                      ~ NA_character_
+  ),
+  levels = c("none_mild", "mod_plus")
+)
+
+table(dat$dep_modplus, useNA = "always")
+
+dat$PHQCAT_A <- NULL # Drop the original PHQCAT_A to avoid data leakage
+
+```
+
+
+```{r}
+str(dat)
+```
+
+## 3. Handle Missing Data
+
+**Recode placeholder codes, such as 9, 99, -99, empty texted, or "not**
+**reported", to `NA`. Recode a code only in the columns where it means**
+**missing, since a value like 9 can be a real score in another column.**
+
+NHIS stores non-response as numeric codes (7/8/9, 97/98/99). These were
+converted to NA during recoding in Part 2, so no disguised missing values remain.
+
+### A First Picture
+
+**Visualize the missing data with `naniar::vis_miss()` and**
+**`naniar::gg_miss_var()`, and report the percentage missing for the**
+**target and for each predictor.**
+
+Black cells are `NA`.
+
+```{r, fig.width = 9, fig.height = 6}
+vis_miss(dat) + theme(plot.margin = margin(t = 40, r = 40, b = 10, l = 10))
+```
+
+**For variables with substantial missingness, discuss whether the data are**
+**most lkely MCAR, MAR, or MNAR, and why.**
+
+**Decide what to do with predictors that are missing for a large share of**
+**the sample. Drop them or keep them, and explain why.**
+
+### Missing Values in Disguise
+
+NHIS stores non-response as numeric codes (7/8/9, 97/98/99). These were
+converted to NA during recoding in Part 2, so no disguised missing values remain.
+
+**Drop rows where the target is missing (do not impute the target).**
+
+This was performed in part 3 when I handled missingness.
+
+
+```{r}
+# Any value in any column that equals the code becomes NA
+# dat <- replace_with_na_all(dat, condition = ~ .x == c(-99, -999))
+
+# summary(dat$perceived_stress)
+```
+
+### Where Are the Missing Values Now?
+
+```{r, fig.height = 5}
+gg_miss_var(dat)
+```
+
+### Imputation
+
+**Impute the remaining missing predictors inside your recipe, and justify**
+**the method you chose. (Options: `step_impute_median()` with**
+**`step_impute_mode()`; `step_impute_knn()`; `step_impute_bag()`.)**
+
+```{r}
+sum(is.na(dat$PHQCAT_A))
+```
+
+Keep only the rows where `dep_modplus` is not missing. `is.na()` is `TRUE`
+for missing values, and `!` flips `TRUE` to `FALSE`.
+
+```{r}
+nrow(dat)
+
+dat <- dat[!is.na(dat$dep_modplus), ]
+
+nrow(dat)
+
+round(colMeans(is.na(dat)) * 100, 2)   # % missing: target + each predictor
+```
+
+**Why is it a bad idea to impute the target?**
+We do not impute the target because a participant with no outcome cannot teach the
+model anything, so those rows are dropped.
+
+Now compare with listwise deletion, which would drop every student
+missing anything:
+
+```{r}
+sum(complete.cases(dat))
+```
+
+Listwise deletion would keep only `r sum(complete.cases(dat))` of the
+`r nrow(dat)` responses Instead, the recipe in Part 6 fills in the
+missing predictors, so we keep all of them.
+
+```{r, fig.height = 3.5}
+ggplot(dat, aes(x = dep_modplus)) +
+  geom_bar(fill = "steelblue", color = "white") +
+  theme_minimal(base_size = 13)
+
+```
+
+## 4. Build the Modeling Pipeline
+
+**The recipe does four jobs, in this order:**
+
+1.  **Fill missing numeric predictors with the median.**
+2.  **Fill missing categorical predictors with the most common category.**
+3.  **Dummy code the factors.**
+4.  **Drop any column with zero variance, then center and scale**
+    **everything.**
+
+**Fill in the data argument and the selectors. The choices are**
+**`all_numeric_predictors()` and `all_nominal_predictors()`.**
+
+**Split the data into training and test sets with**
+**`rsample::initial_split()`, stratified on the target. Set a seed so the**
+**split can be reproduced, and state the proportions you used.**
+
+```{r}
+set.seed(559)
+
+split    <- initial_split(dat, prop = 0.5, strata = "dep_modplus")
+train_df <- training(split)
+test_df  <- testing(split)
+
+c(train = nrow(train_df), test = nrow(test_df))
+```
+
+**Write a preprocessing recipe with the recipes package. At minimum, it**
+**should:**
+
+- **Impute missing predictors**
+
+- **Dummy code factors**
+
+- **Remove zero variance predictors**
+
+- **Center and scale numeric predictors**
+
+- **Other options: lump rare categories with `step_other()` or**
+  **transforming skewed predictors**
+  
+```{r}
+# In recipes, "nominal" means factor (text columns count too), so
+# all_nominal_predictors() selects the factors you made in Part 2
+blueprint <- recipe(dep_modplus ~ ., data = train_df) %>%
+  step_impute_median(all_numeric_predictors()) %>%
+  step_impute_mode(all_nominal_predictors()) %>%
+  step_dummy(all_nominal_predictors()) %>%
+  step_zv(all_predictors()) %>%
+  step_normalize(all_numeric_predictors())
+
+blueprint
+```
+
+**Pass the recipe to `caret::train()` rather than preprocessing the data**
+**yourself, so every step is learned within each cross-validation fold.**
+
+`train()` will prep the recipe inside each fold for us. Here we prep and
+bake it once, only to check the result.
+
+```{r}
+baked <- bake(prep(blueprint), new_data = NULL)
+dim(baked)
+sum(is.na(baked))
+
+```
+
+There are no missing values left, and there are more columns than we
+started with, because dummy coding turned each factor into several
+indicator columns.
+
+## 5. Fit and Compare Models
+
+
+### A Lambda Grid for This Data
+
+```{r}
+x_baked <- as.matrix(baked[, names(baked) != "dep_modplus"])
+
+lambda_max <- max(glmnet(x_baked, baked$dep_modplus,
+                         family = "binomial", alpha = 1)$lambda)
+
+lambda_grid <- 10^seq(log10(lambda_max) - 4, log10(lambda_max) + 1,
+                      length.out = 100)
+
+range(lambda_grid)
+```
+
+**Use k-fold cross validation with `trainControl()`, and state the number**
+**of folds.**
+
+**Note any data leakage you are concerned about and what you did about it.**
+
+**Fit a baseline model with `method = "null"`. It shows how well you can**
+**predict without using any predictors, and it is what we will compare**
+**every other model to.**
+
+**Use half the responses for training and half for testing, as in the**
+**lecture.**
+
+`strata = "dep_modplus"` stratifies the split: it keeps the target's
+distribution about the same in the training and test sets. For a
+dichotomous target like this one, `initial_split()` groups the target
+into two sections. Both sets had the same split of none_mild to mod_plus.
+
+Always stratify when your outcome is
+unbalanced, for example when only 10% of people are in one group.
+Otherwise the test set can end up with too few people in the smaller
+group to evaluate the model.
+
+Everything in Parts 2 to 4 happened before the split, and that is fine.
+None of those steps learned anything from the data: `-99` means missing
+no matter who the student is. Imputation is different. It computes
+medians and modes from the data, so it belongs in the recipe, where it
+is learned from training data only.
+
+The recipe takes the place of the formula `dep_modplus ~ .` in `train()`.
+It also does the centering and scaling, so we no longer need `preProc`.
+
+```{r}
+ctrl <- trainControl(method = "cv", number = 10, classProbs = TRUE, summaryFunction = mnLogLoss) # returns logLoss, Accuracy, Kappa, etc.
+set.seed(559)
+fit_null <- train(
+  blueprint,
+  data = train_df,
+  method = "null", metric = "logLoss", trControl = ctrl)
+
+```
+**One of the three must be the unpenalized regression, linear or logistic.**
+**At least one must be regularized: lasso, ridge, or elastic net, with a**
+**grid of lambda values (and alpha values for elastic net) tuned by cross**
+**validation. The others can use other regularization methods or different**
+**sets of predictors.**
+
+1. Ordinary logistic regression.
+*If your target is dichotomous, you are fitting logistic regression, and*
+*several settings change from the linear case. Before you fit your*
+*models, review the Loose Ends: Binary Outcome slide at the end of the*
+*Regularization lecture, which lists what needs to change.*
+
+```{r}
+set.seed(559)
+fit_glm <- train(
+  blueprint,
+  data = train_df,
+  method = "glm", metric = "logLoss",
+  trControl = ctrl)
+```
+
+### Additional models: Lasso, Ridge, and Elastic Net
+
+**Compare at least three models in addition to the baseline. All of them**
+**must use the same target and the same training data.**
+
+### A Quick Reference
+
+All three models minimize the same thing:
+
+$$\text{Loss} = \text{MSE}_{\text{train}} + \lambda \times \text{Penalty}$$
+
+- `lambda` ($\lambda$) sets how much the penalty counts. Cross
+  validation chooses it from the grid built in Part 6.
+- `alpha` ($\alpha$) sets which penalty is used.
+
+| Model | `alpha` | Penalty | What it does |
+|------------------|------------------|------------------|------------------|
+| Lasso | 1 | $\sum_{j=1}^{p} \lvert\beta_j\rvert$ | Can shrink a coefficient to exactly zero, which drops that predictor |
+| Ridge | 0 | $\sum_{j=1}^{p} \beta_j^2$ | Shrinks every coefficient, but never to exactly zero |
+| Elastic net | Between 0 and 1 | $\alpha \sum_{j=1}^{p} \lvert\beta_j\rvert + \frac{1 - \alpha}{2} \sum_{j=1}^{p} \beta_j^2$ | A mix of the two, useful when predictors are highly correlated |
+
+### Lasso
+
+Set `alpha` for the lasso, and fill in the method and the grid.
+
+```{r}
+lasso_grid <- expand.grid(
+  alpha  = 1,
+  lambda = lambda_grid )
+
+set.seed(559)
+fit_lasso <- train(
+  blueprint,
+  data = train_df,
+  method = "glmnet",
+  family = "binomial", metric = "logLoss",
+  trControl = ctrl,
+  tuneGrid  = lasso_grid)
+
+fit_lasso$bestTune
+```
+
+```{r, fig.height = 3.5}
+ggplot(fit_lasso) + theme_minimal(base_size = 13)
+```
+
+### Ridge
+
+Set `alpha` for ridge.
+
+```{r}
+ridge_grid <- expand.grid(
+  alpha  = 0,
+  lambda = lambda_grid )
+
+set.seed(559)
+fit_ridge <- train(
+  blueprint,
+  data = train_df,
+  method = "glmnet",
+  family = "binomial",
+  metric = "logLoss",
+  trControl = ctrl,
+  tuneGrid  = ridge_grid )
+
+fit_ridge$bestTune
+```
+
+### Elastic Net
+
+Let `alpha` run from 0 to 1 in steps of 0.1.
+
+```{r}
+en_grid <- expand.grid(
+  alpha  = seq(from = 0, to = 1, by = 0.1),
+  lambda = lambda_grid)
+
+set.seed(559)
+fit_en <- train(
+  blueprint,
+  data = train_df,
+  method = "glmnet",
+  family = "binomial", 
+  metric = "logLoss",
+  trControl = ctrl,
+  tuneGrid  = en_grid)
+
+fit_en$bestTune
+```
+
+### Comparing the Models
+
+Every model was fit after `set.seed(559)`, so they all used the same 10
+folds. This table puts their cross validated performance side by side.
+It is the table to use when choosing a final model, before the test set
+is touched.
+**Use performance measures that fit your target. For a continuous target,**
+**report RMSE, R2, and MAE. For a dichotomous target, report accuracy,**
+**sensitivity, and specificity.**
+
+**Include a table summarizing the cross validated performance of every**
+**model.**
+
+### CV Accuracy Table
+
+```{r}
+cv_table <- rbind(
+  baseline    = getTrainPerf(fit_null),
+  logistic    = getTrainPerf(fit_glm),
+  lasso       = getTrainPerf(fit_lasso),
+  ridge       = getTrainPerf(fit_ridge),
+  elastic_net = getTrainPerf(fit_en)
+)
+
+round(cv_table[, "TrainlogLoss", drop = FALSE], 3)
+
+cv_table[c("lasso","elastic_net"), "TrainlogLoss"]
+```
+
+**Choose a final model and justify the choice using the cross validation**
+**results.**
+The final model I chose is the lasso  model. I chose this model because although all models had relatively similar logLoss, the two best models (lasso and elastic net) were tied (both with a logLoss ~0.203)), and lasso is a much simpler model. Note: These differences are
+marginal, and all the models are pretty weak.
+
+### Evaluating the Final Model on The Test Set
+
+**Evaluate the final model on the test set, once. Report its test set**
+**performance. For a lasso or elastic net, report how many predictors it**
+**kept. You do not need to list the coefficients; the variable importance**
+**plot below shows which predictors matter.**
+
+**Show which predictors matter most with `caret::varImp()`. The `vip`**
+**package used in lecture is no longer on CRAN.**
+
+In Project 1, choose your final model from the
+cross validation table in Part 8, and evaluate only that model on the
+test set.
+
+```{r}
+fit_final <- fit_lasso   # chosen from cv_table: lowest TrainlogLoss and simplest model
+
+
+pred_final <- predict(fit_final, newdata = test_df)
+
+cm <- confusionMatrix(pred_final, test_df$dep_modplus, positive = "mod_plus")
+cm
+
+library(ggplot2)
+
+cm_df <- as.data.frame(cm$table)   # columns: Prediction, Reference, Freq
+
+ggplot(cm_df, aes(x = Reference, y = Prediction, fill = Freq)) +
+  geom_tile() +
+  geom_text(aes(label = Freq), size = 5) +
+  scale_fill_gradient(low = "white", high = "steelblue") +
+  labs(x = "Actual", y = "Predicted", fill = "Count",
+       title = "Confusion matrix: final lasso model (test set)") +
+  theme_minimal(base_size = 13)
+```
+
+**How many columns did the lasso keep, out of all the predictor columns it**
+**could use after dummy coding?**
+
+```{r}
+# columns the lasso kept
+sum(coef(fit_lasso$finalModel, s = fit_lasso$bestTune$lambda)[-1] != 0)
+
+# columns it could use: everything in the baked data except symptoms
+ncol(baked) - 1
+```
+
+These are the coefficients the lasso kept. The recipe centered and
+scaled every predictor column, including the dummy columns, so the
+coefficients are on a standardized scale. Compare their sizes, but do
+not read them in raw units.
+
+```{r}
+lasso_coefs <- as.matrix(coef(fit_lasso$finalModel, s = fit_lasso$bestTune$lambda))
+
+round(lasso_coefs[lasso_coefs[, 1] != 0, , drop = FALSE], 3)
+```
+
+```{r, fig.height = 4.6}
+# varImp() comes with caret. It ranks predictors by the size of their
+# standardized coefficients, scaled so the largest is 100, like vip() in lecture.
+ggplot(varImp(fit_final), top = 15) +
+  theme_minimal(base_size = 13)
+```
+
+### Part 10: Wrapping Up
+
+Answer each question in a sentence or two.
+
+1.  Which model had the highest performance (lowest CV log loss)? How many predictor columns did
+    it keep?
+
+    The lasso had the lowest cross-validated log loss and was the final model; it kept 21 of 22 predictor columns.
+
+2.  Which predictors came out on top in the importance plot? Do they
+    make sense?
+
+    Self-rated health and age were the top predictors, followed by disability and never-smoker status; yes, these align with the depression literature.
+
+3.  Listwise deletion would have kept only `r sum(complete.cases(dat))`
+    of the `r nrow(dat)` responses Give one reason imputing inside the
+    recipe is better than dropping those rows.
+
+    Imputing helps us preserve the amount of data we have available for
+    our work.
